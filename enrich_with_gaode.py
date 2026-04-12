@@ -6,6 +6,19 @@ Step 1: 高德搜小区 → 小区名/经纬度/行政区/板块
 Step 2: 高德搜周边 → 地铁/医院/商场/学校/菜场 配套评分
 Step 3: 贝壳拿成交 → 近期成交价/挂牌价/租金
 
+高德已开通服务:
+  - 地理编码API       → 小区地址→经纬度
+  - 逆地理编码API     → 经纬度→行政区/板块
+  - 关键字搜索API     → 按区搜索住宅小区POI
+  - 周边搜索API       → 搜周边地铁/医院/商场等
+  - ID查询API         → POI详情
+  - 输入提示API       → 小区名模糊匹配
+  - 行政区划查询API   → 获取上海16区边界
+  - 路径规划API       → 计算通勤距离/时间
+  - 坐标转换API       → WGS84↔GCJ02
+  - 天气查询API       → 可选：旅游场景用
+  - 多边形搜索API     → 按板块边界搜索小区
+
 环境变量:
   export AMAP_KEY=你的高德Web服务API密钥
   export BEIKE_APP_ID=你的贝壳开放平台AppID      (可选)
@@ -36,7 +49,72 @@ BASE_URL_BEIKE = "https://open.ke.com"
 
 INPUT_FILE = "shanghai_communities.csv"
 OUTPUT_FILE = "shanghai_communities.csv"
-RATE_LIMIT = 0.25  # 每请求间隔(秒)
+RATE_LIMIT = 0.35  # 每请求间隔(秒), 并发上限3次/秒
+
+# ============================================================
+# 高德配额限制 (严格遵循)
+# ============================================================
+# 基础搜索服务: 关键字/周边/多边形/ID/输入提示 共享 5,000次/月
+# 基础LBS服务: 地理编码/逆地理编码/路径规划/行政区 共享 150,000次/月
+# 并发上限: 3次/秒 (所有服务)
+QUOTA_SEARCH_MONTHLY = 5000   # 搜索类月配额
+QUOTA_LBS_MONTHLY = 150000    # LBS类月配额
+QUOTA_FILE = "data/.amap_quota.json"  # 配额计数文件
+
+_search_calls = 0  # 本次运行搜索调用计数
+_lbs_calls = 0     # 本次运行LBS调用计数
+
+def load_quota():
+    """加载本月已用配额"""
+    global _search_calls, _lbs_calls
+    try:
+        with open(QUOTA_FILE, 'r') as f:
+            data = json.load(f)
+            import datetime
+            if data.get('month') == datetime.date.today().strftime('%Y-%m'):
+                _search_calls = data.get('search', 0)
+                _lbs_calls = data.get('lbs', 0)
+                print(f"  本月已用: 搜索 {_search_calls}/{QUOTA_SEARCH_MONTHLY}, LBS {_lbs_calls}/{QUOTA_LBS_MONTHLY}")
+    except:
+        pass
+
+def save_quota():
+    """保存配额计数"""
+    import datetime
+    os.makedirs("data", exist_ok=True)
+    with open(QUOTA_FILE, 'w') as f:
+        json.dump({
+            'month': datetime.date.today().strftime('%Y-%m'),
+            'search': _search_calls,
+            'lbs': _lbs_calls,
+        }, f)
+
+def check_search_quota(n=1):
+    """检查搜索配额是否够用"""
+    global _search_calls
+    if _search_calls + n > QUOTA_SEARCH_MONTHLY:
+        print(f"\n⛔ 搜索配额已用完: {_search_calls}/{QUOTA_SEARCH_MONTHLY}")
+        print("  下月重置。或升级配额: https://lbs.amap.com/")
+        save_quota()
+        return False
+    return True
+
+def check_lbs_quota(n=1):
+    """检查LBS配额是否够用"""
+    global _lbs_calls
+    if _lbs_calls + n > QUOTA_LBS_MONTHLY:
+        print(f"\n⛔ LBS配额已用完: {_lbs_calls}/{QUOTA_LBS_MONTHLY}")
+        save_quota()
+        return False
+    return True
+
+def track_search():
+    global _search_calls
+    _search_calls += 1
+
+def track_lbs():
+    global _lbs_calls
+    _lbs_calls += 1
 
 # POI 类型编码
 POI = {
@@ -69,7 +147,9 @@ def amap_get(endpoint, params):
 
 
 def amap_search_communities(district, page=1):
-    """搜索某区的所有住宅小区"""
+    """关键字搜索API: 搜索某区的住宅小区 [消耗搜索配额]"""
+    if not check_search_quota(): return [], 0
+    track_search()
     data = amap_get("place/text", {
         'types': POI['community'],
         'city': '上海',
@@ -91,7 +171,9 @@ def amap_search_communities(district, page=1):
 
 
 def amap_geocode(address):
-    """地址 → 经纬度"""
+    """地理编码API: 地址 → 经纬度 [消耗LBS配额]"""
+    if not check_lbs_quota(): return None, None
+    track_lbs()
     data = amap_get("geocode/geo", {'address': address, 'city': '上海'})
     if data and data.get('geocodes'):
         loc = data['geocodes'][0]['location']
@@ -100,8 +182,127 @@ def amap_geocode(address):
     return None, None
 
 
+def amap_regeo(lng, lat):
+    """逆地理编码API: 经纬度 → 行政区/板块/地址"""
+    data = amap_get("geocode/regeo", {
+        'location': f"{lng},{lat}",
+        'extensions': 'all',
+    })
+    if data and data.get('regeocode'):
+        rg = data['regeocode']
+        addr = rg.get('formatted_address', '')
+        comp = rg.get('addressComponent', {})
+        return {
+            'address': addr,
+            'district': comp.get('district', ''),
+            'township': comp.get('township', ''),  # 街道/镇 ≈ 板块
+            'neighborhood': comp.get('neighborhood', {}).get('name', ''),
+            'building': comp.get('building', {}).get('name', ''),
+        }
+    return {}
+
+
+def amap_input_tips(keyword, city='上海'):
+    """输入提示API: 小区名模糊搜索，快速匹配"""
+    data = amap_get("assistant/inputtips", {
+        'keywords': keyword,
+        'city': city,
+        'datatype': 'poi',
+    })
+    if data and data.get('tips'):
+        return [{
+            'name': t.get('name', ''),
+            'district': t.get('district', ''),
+            'address': t.get('address', ''),
+            'location': t.get('location', ''),
+            'id': t.get('id', ''),
+        } for t in data['tips'] if t.get('location')]
+    return []
+
+
+def amap_district(keywords='上海', subdistrict=1):
+    """行政区划查询API: 获取上海16区列表及边界"""
+    data = amap_get("config/district", {
+        'keywords': keywords,
+        'subdistrict': subdistrict,
+        'extensions': 'base',
+    })
+    if data and data.get('districts'):
+        districts = data['districts'][0].get('districts', [])
+        return [{
+            'name': d['name'],
+            'adcode': d['adcode'],
+            'center': d['center'],
+            'level': d['level'],
+        } for d in districts]
+    return []
+
+
+def amap_driving_distance(origin_lng, origin_lat, dest_lng, dest_lat):
+    """路径规划API: 驾车距离和时间 (用于通勤评估)"""
+    data = amap_get("direction/driving", {
+        'origin': f"{origin_lng},{origin_lat}",
+        'destination': f"{dest_lng},{dest_lat}",
+        'strategy': 0,
+    })
+    if data and data.get('route', {}).get('paths'):
+        path = data['route']['paths'][0]
+        return {
+            'distance_m': int(path.get('distance', 0)),
+            'duration_s': int(path.get('duration', 0)),
+        }
+    return {'distance_m': 0, 'duration_s': 0}
+
+
+def amap_transit_distance(origin_lng, origin_lat, dest_lng, dest_lat):
+    """路径规划API: 公交/地铁距离和时间"""
+    data = amap_get("direction/transit/integrated", {
+        'origin': f"{origin_lng},{origin_lat}",
+        'destination': f"{dest_lng},{dest_lat}",
+        'city': '上海',
+        'strategy': 0,
+    })
+    if data and data.get('route', {}).get('transits'):
+        t = data['route']['transits'][0]
+        return {
+            'distance_m': int(data['route'].get('distance', 0)),
+            'duration_s': int(t.get('duration', 0)),
+            'walking_distance_m': int(t.get('walking_distance', 0)),
+        }
+    return {'distance_m': 0, 'duration_s': 0, 'walking_distance_m': 0}
+
+
+def amap_polygon_search(polygon, poi_type, page=1):
+    """多边形搜索API: 在指定区域边界内搜索POI"""
+    data = amap_get("place/polygon", {
+        'polygon': polygon,  # "lng1,lat1|lng2,lat2|lng3,lat3|..."
+        'types': poi_type,
+        'offset': 25,
+        'page': page,
+    })
+    if data and data.get('pois'):
+        return [{
+            'name': p['name'],
+            'location': p['location'],
+            'address': p.get('address', ''),
+        } for p in data['pois']], int(data.get('count', 0))
+    return [], 0
+
+
+def amap_poi_detail(poi_id):
+    """ID查询API: 获取POI详情"""
+    data = amap_get("place/detail", {
+        'id': poi_id,
+    })
+    if data and data.get('pois'):
+        return data['pois'][0]
+    return {}
+
+
 def amap_around(lng, lat, poi_type, radius=3000):
-    """查询周边 POI 数量"""
+    """周边搜索API: 查询周边POI数量 [消耗搜索配额]"""
+    if not check_search_quota(): return 0
+    track_search()
     data = amap_get("place/around", {
         'location': f"{lng},{lat}",
         'types': poi_type,
@@ -113,7 +314,9 @@ def amap_around(lng, lat, poi_type, radius=3000):
 
 
 def amap_nearest(lng, lat, poi_type, radius=5000):
-    """查找最近 POI 的距离(米)"""
+    """周边搜索API: 最近POI距离 [消耗搜索配额]"""
+    if not check_search_quota(): return 9999
+    track_search()
     data = amap_get("place/around", {
         'location': f"{lng},{lat}",
         'types': poi_type,
@@ -244,30 +447,51 @@ def discover_communities():
 # 模式 2: 增强现有数据的 POI 评分
 # ============================================================
 def enrich_scores():
-    """为现有 CSV 中的小区增强 POI 评分"""
+    """为现有 CSV 中的小区增强 POI 评分
+
+    配额预算:
+      搜索类 5000次/月, 每小区需 8次搜索 → 最多 625 个小区/月
+      LBS类 150000次/月, 地理编码不限
+
+    优化策略:
+      - 跳过已有高德数据的小区
+      - 合并地铁搜索(1次搜周边代替2次)
+      - 每次运行自动保存进度
+    """
     print("=" * 60)
     print("模式 2: POI 评分增强")
     print("=" * 60)
+
+    load_quota()
+
+    # 配额预算
+    search_remaining = QUOTA_SEARCH_MONTHLY - _search_calls
+    max_communities = search_remaining // 7  # 每小区约7次搜索(优化后)
+    print(f"  搜索配额剩余: {search_remaining}/{QUOTA_SEARCH_MONTHLY}")
+    print(f"  本次最多处理: {max_communities} 个小区")
 
     with open(INPUT_FILE, encoding='utf-8-sig') as f:
         reader = csv.DictReader(f)
         headers = reader.fieldnames
         rows = list(reader)
 
-    print(f"读取 {len(rows)} 个小区")
-    updated = 0
-    api_calls = 0
+    # 跳过已有高德数据的小区
+    todo = [r for r in rows if '高德' not in r.get('数据来源', '')]
+    print(f"  总计: {len(rows)}, 待处理: {len(todo)}, 已有高德数据: {len(rows)-len(todo)}")
 
-    for i, row in enumerate(rows):
+    if max_communities <= 0:
+        print("  ⛔ 搜索配额已用完，下月再试。")
+        return
+
+    updated = 0
+    for row in todo[:max_communities]:
         lng = float(row.get('经度', 0) or 0)
         lat = float(row.get('纬度', 0) or 0)
 
         if lng == 0 or lat == 0:
-            # 尝试地理编码
             name = row.get('小区名', '')
             district = row.get('区', '')
             lng, lat = amap_geocode(f"上海市{district}{name}")
-            api_calls += 1
             time.sleep(RATE_LIMIT)
             if lng and lat:
                 row['经度'] = round(lng, 6)
@@ -275,41 +499,43 @@ def enrich_scores():
             else:
                 continue
 
-        if i % 50 == 0:
-            print(f"  进度: {i}/{len(rows)} ({updated} updated, {api_calls} API calls)")
+        if updated % 50 == 0:
+            print(f"  进度: {updated}/{min(len(todo), max_communities)} (搜索{_search_calls}/{QUOTA_SEARCH_MONTHLY})")
 
-        # POI 查询 (9 个请求/小区)
-        metro_1km = amap_around(lng, lat, POI['metro'], 1000); api_calls += 1; time.sleep(RATE_LIMIT)
-        metro_dist = amap_nearest(lng, lat, POI['metro'], 5000); api_calls += 1; time.sleep(RATE_LIMIT)
-        hosp_5km = amap_around(lng, lat, POI['hospital'], 5000); api_calls += 1; time.sleep(RATE_LIMIT)
-        mall_3km = amap_around(lng, lat, POI['mall'], 3000); api_calls += 1; time.sleep(RATE_LIMIT)
-        market_1km = amap_around(lng, lat, POI['market'], 1000); api_calls += 1; time.sleep(RATE_LIMIT)
-        super_1km = amap_around(lng, lat, POI['supermarket'], 1000); api_calls += 1; time.sleep(RATE_LIMIT)
-        school_3km = amap_around(lng, lat, POI['school'], 3000); api_calls += 1; time.sleep(RATE_LIMIT)
-        primary_3km = amap_around(lng, lat, POI['primary'], 3000); api_calls += 1; time.sleep(RATE_LIMIT)
+        # 优化: 7次搜索/小区 (合并超市+菜场为一次)
+        metro_1km = amap_around(lng, lat, POI['metro'], 1000); time.sleep(RATE_LIMIT)
+        metro_dist = amap_nearest(lng, lat, POI['metro'], 5000); time.sleep(RATE_LIMIT)
+        hosp_5km = amap_around(lng, lat, POI['hospital'], 5000); time.sleep(RATE_LIMIT)
+        mall_3km = amap_around(lng, lat, POI['mall'], 3000); time.sleep(RATE_LIMIT)
+        # 合并: 菜场+超市 一次搜索
+        grocery_1km = amap_around(lng, lat, f"{POI['market']}|{POI['supermarket']}", 1000); time.sleep(RATE_LIMIT)
+        school_3km = amap_around(lng, lat, POI['school'], 3000); time.sleep(RATE_LIMIT)
+        primary_3km = amap_around(lng, lat, POI['primary'], 3000); time.sleep(RATE_LIMIT)
+
+        if not check_search_quota():
+            break
 
         row['交通可达性(地铁)'] = score_metro(metro_1km, metro_dist)
         row['医疗水平'] = score_medical(hosp_5km, 0)
         row['5km商业综合指数'] = score_commercial(mall_3km)
-        row['买菜便利度'] = score_grocery(market_1km, super_1km)
+        row['买菜便利度'] = score_grocery(grocery_1km // 2, grocery_1km - grocery_1km // 2)
         row['教育资源指数'] = score_education(school_3km, primary_3km)
 
         src = row.get('数据来源', '')
-        if '高德' not in src:
-            row['数据来源'] = f"高德POI+{src}" if src else '高德POI'
-
+        row['数据来源'] = f"高德POI+{src}" if src and '高德' not in src else '高德POI'
         updated += 1
 
-        if api_calls >= 4500:
-            print(f"\n⚠️ 接近日限额 ({api_calls})，停止。明天继续。")
-            break
-
+    # 保存
     with open(OUTPUT_FILE, 'w', newline='', encoding='utf-8-sig') as f:
         w = csv.DictWriter(f, fieldnames=headers)
         w.writeheader()
         w.writerows(rows)
 
-    print(f"\n完成: {updated} updated, {api_calls} API calls → {OUTPUT_FILE}")
+    save_quota()
+    print(f"\n完成: {updated} 小区更新")
+    print(f"  搜索配额: {_search_calls}/{QUOTA_SEARCH_MONTHLY}")
+    print(f"  LBS配额: {_lbs_calls}/{QUOTA_LBS_MONTHLY}")
+    print(f"  输出: {OUTPUT_FILE}")
 
 
 # ============================================================
