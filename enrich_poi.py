@@ -9,7 +9,7 @@
   export TENCENT_KEY=你的腾讯位置服务Key (必选其一)
 
 用法:
-  python3 enrich_poi.py discover   — 搜索全市小区
+  python3 enrich_poi.py discover   — 搜索全市小区 (TODO: 未实现)
   python3 enrich_poi.py enrich     — POI 评分增强
   python3 enrich_poi.py lbs        — 仅坐标+通勤距离(不消耗搜索配额)
   python3 enrich_poi.py all        — 全部
@@ -305,10 +305,10 @@ def run_lbs():
 def run_enrich():
     print("=" * 60)
     print("模式: 完整 POI 增强 (搜索+LBS)")
-    print(f"  高德搜索配额: {5000-quota['amap_search']} 剩余")
-    print(f"  腾讯搜索配额: {6000-quota['tencent_search']} 剩余")
     print("=" * 60)
     load_quota()
+    print(f"  高德搜索配额: {5000-quota['amap_search']} 剩余")
+    print(f"  腾讯搜索配额: {6000-quota['tencent_search']} 剩余")
 
     with open('shanghai_communities.csv', encoding='utf-8-sig') as f:
         comms = [(r['区'], r['小区名']) for r in csv.DictReader(f)]

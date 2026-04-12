@@ -1,12 +1,12 @@
 # 中国不动产租售指南
 
-上海小区多维评分数据库。**192 个小区 · 16 区全覆盖 · 2020-2026 年价格走势 · 46 列量化指标**
+上海小区多维评分数据库。**3099 个小区 · 16 区全覆盖 · 2020-2026 年价格走势 · 48 列量化指标**
 
 ## 可视化报告 (点击直接查看)
 
 | Notebook | 内容 |
 |----------|------|
-| [shanghai_communities.ipynb](shanghai_communities.ipynb) | 完整数据表（192 条，红绿色阶） |
+| [shanghai_communities.ipynb](shanghai_communities.ipynb) | 完整数据表（3099 条，红绿色阶） |
 | [shanghai_rankings.ipynb](shanghai_rankings.ipynb) | 综合 · 性价比 · 家庭 · 单身 · 科技园 · 各区排名 |
 
 ## 数据文件

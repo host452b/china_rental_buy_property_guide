@@ -41,6 +41,10 @@ import hashlib
 # 配置 (从环境变量读取)
 # ============================================================
 AMAP_KEY = os.environ.get('AMAP_KEY', '')
+if not AMAP_KEY:
+    print('错误: 请设置环境变量 AMAP_KEY')
+    print('  export AMAP_KEY=你的高德Key')
+    # sys.exit(1)  # uncomment to enforce
 BEIKE_APP_ID = os.environ.get('BEIKE_APP_ID', '')
 BEIKE_APP_SECRET = os.environ.get('BEIKE_APP_SECRET', '')
 
